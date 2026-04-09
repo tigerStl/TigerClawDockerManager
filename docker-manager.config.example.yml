@@ -1,0 +1,8 @@
+# TigerClawDockerManager — part of the TigerClaw series (TigerClaw 系列产品).
+# Copyright (c) 2026 tiger liu. All rights reserved.  Version 1.0.0
+#
+# Copy to docker-manager.config.yml and edit.
+# Env vars still override: DOCKER_MANAGER_PORT, PORT, DOCKER_MANAGER_HOST, DOCKER_MANAGER_CONFIG (path to this file).
+
+port: 9847
+host: 127.0.0.1

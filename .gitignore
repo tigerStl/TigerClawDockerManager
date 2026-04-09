@@ -1,0 +1,5 @@
+node_modules/
+dist/
+build/docker-manager.cjs
+release/
+docker-manager.config.yml

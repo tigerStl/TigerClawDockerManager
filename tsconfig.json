@@ -1,0 +1,19 @@
+{
+  /* TigerClawDockerManager — TigerClaw 系列产品 | v1.0.0 © 2026 tiger liu */
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "types": [],
+    "baseUrl": "."
+  },
+  "include": ["src"]
+}

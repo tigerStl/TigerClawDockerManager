@@ -1,0 +1,479 @@
+/*!
+ * TigerClawDockerManager — part of the TigerClaw series (TigerClaw 系列产品).
+ * Version 1.0.0 | Copyright (c) 2026 tiger liu. All rights reserved.
+ *
+ * Docker file explorer — compact, Explorer-like density
+ */
+.dexp {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 52px);
+  min-height: 480px;
+  margin: 0 -14px;
+  padding: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.dexp-banner {
+  padding: 4px 8px;
+  font-size: 12px;
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+  border-bottom: 1px solid var(--border);
+}
+
+.dexp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-elevated);
+  font-size: 12px;
+}
+
+.dexp-toolbar label {
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+.dexp-toolbar select,
+.dexp-toolbar input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-height: 26px;
+}
+
+.dexp-toolbar .dexp-path-input {
+  flex: 1;
+  min-width: 180px;
+  font-family: var(--font-mono);
+}
+
+.dexp-btn {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+.dexp-btn:hover {
+  border-color: var(--muted);
+}
+
+.dexp-btn-primary {
+  background: rgba(47, 129, 247, 0.15);
+  border-color: rgba(47, 129, 247, 0.4);
+  color: var(--primary);
+}
+
+.dexp-btn-danger {
+  border-color: rgba(248, 81, 73, 0.45);
+  color: var(--error);
+}
+
+.dexp-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.dexp-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.dexp-list-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+.dexp-breadcrumb {
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.dexp-breadcrumb button {
+  background: none;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.dexp-breadcrumb button:hover {
+  text-decoration: underline;
+}
+
+.dexp-table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+
+.dexp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dexp-table th {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  background: var(--card-elevated);
+  z-index: 1;
+}
+
+.dexp-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dexp-table tr {
+  cursor: pointer;
+}
+
+.dexp-table tr:hover td {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dexp-table tr.dexp-row-sel td {
+  background: rgba(47, 129, 247, 0.12);
+}
+
+.dexp-icon {
+  display: inline-block;
+  width: 14px;
+  margin-right: 4px;
+  opacity: 0.85;
+}
+
+.dexp-editor-pane {
+  width: min(52%, 720px);
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.dexp-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  padding: 0 2px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-elevated);
+  overflow-x: auto;
+  min-height: 30px;
+}
+
+.dexp-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  margin-bottom: -1px;
+  cursor: pointer;
+  color: var(--text-dim);
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dexp-tab:hover {
+  color: var(--text);
+}
+
+.dexp-tab-active {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.dexp-tab-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.dexp-tab-close:hover {
+  color: var(--error);
+}
+
+.dexp-editor-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 4px 6px 6px;
+  gap: 4px;
+}
+
+.dexp-editor-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.dexp-editor-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 200px;
+  resize: none;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  tab-size: 2;
+}
+
+.dexp-editor-textarea:disabled {
+  opacity: 0.65;
+}
+
+.dexp-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dexp-save-feedback {
+  font-size: 12px;
+  color: var(--success, #3fb950);
+}
+
+/* Embedded container console (docker exec, not PTY) */
+.dexp-console {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--card-elevated);
+  display: flex;
+  flex-direction: column;
+  max-height: min(42vh, 320px);
+}
+
+.dexp-console--collapsed {
+  max-height: none;
+}
+
+.dexp-console--collapsed .dexp-console-output,
+.dexp-console--collapsed .dexp-console-input-row {
+  display: none;
+}
+
+.dexp-console-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.dexp-console-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dexp-console-hint {
+  color: var(--muted);
+  flex: 1;
+  min-width: 120px;
+}
+
+.dexp-console-output {
+  flex: 1;
+  min-height: 72px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  line-height: 1.35;
+  background: #0d1117;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dexp-console-placeholder {
+  color: var(--muted);
+}
+
+.dexp-cl-cmd {
+  color: #79c0ff;
+}
+
+.dexp-cl-out {
+  color: #c9d1d9;
+}
+
+.dexp-cl-err {
+  color: #ff7b72;
+}
+
+.dexp-cl-exit {
+  color: #8b949e;
+}
+
+.dexp-console-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px 6px;
+  font-size: 11px;
+}
+
+.dexp-console-cwd {
+  color: var(--text-dim);
+}
+
+.dexp-console-cwd code {
+  font-size: 10px;
+  word-break: break-all;
+}
+
+.dexp-console-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dexp-console-shell {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  min-height: 26px;
+}
+
+.dexp-console-shell-label {
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.dexp-console-cmd {
+  flex: 1;
+  min-width: 160px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  min-height: 28px;
+}
+
+/* Settings modal */
+.dexp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.dexp-modal {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 520px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.dexp-modal h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dexp-modal p {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.dexp-modal textarea {
+  width: 100%;
+  min-height: 72px;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  margin-bottom: 8px;
+}
+
+.dexp-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dexp-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
