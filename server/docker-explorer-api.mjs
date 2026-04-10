@@ -21,6 +21,9 @@ const execFileAsync = promisify(execFile);
 
 const MAX_READ_BYTES = 5 * 1024 * 1024;
 
+/** JSON body limit for PUT /file (align with editor + MAX_READ_BYTES headroom). */
+const MAX_WRITE_JSON_BYTES = "20mb";
+
 /** Server-side blocked extensions for text read/write via API (download still allowed) */
 const DEFAULT_BLOCKED = new Set([
   "exe",
@@ -142,22 +145,40 @@ async function listContainers() {
 }
 
 /**
- * Pass paths via env vars — embedding paths in `powershell -Command` breaks when
- * segments look like parameters (e.g. `-c` inside `...-configuired\...`).
+ * Windows container paths must not be passed raw in `docker exec -e VAR=value`:
+ * segments like `-c` inside `apache-tomcat-configuired\...` can be misparsed by the
+ * Docker CLI / runtime and corrupt the path (e.g. spaces inserted). Pass UTF-8
+ * paths as Base64 in `*_B64` env vars and decode inside PowerShell.
  */
-const PS_ENV_LIST = "DEXP_LIST_PATH";
-const PS_ENV_DELETE = "DEXP_DELETE_PATH";
-const PS_ENV_READ = "DEXP_READ_PATH";
+const PS_ENV_LIST_B64 = "DEXP_LIST_PATH_B64";
+const PS_ENV_DELETE_B64 = "DEXP_DELETE_PATH_B64";
+const PS_ENV_READ_B64 = "DEXP_READ_PATH_B64";
 const PS_ENV_MAX_READ = "DEXP_MAX_READ_BYTES";
-const PS_ENV_WRITE = "DEXP_WRITE_PATH";
+const PS_ENV_WRITE_B64 = "DEXP_WRITE_PATH_B64";
 
-async function dockerExecPowershellWithEnv(containerId, envName, envValue, psCommand) {
+function winPathToDockerEnvB64(containerPath) {
+  return Buffer.from(containerPath, "utf8").toString("base64");
+}
+
+/** `$p` = decoded path from Base64 env (must match PS_ENV_*_B64 name). */
+function psDecodePathFromB64Env(envB64Name) {
+  return `$p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:${envB64Name}))`;
+}
+
+async function dockerExecPowershellWithPathB64(
+  containerId,
+  envB64Name,
+  containerPath,
+  psCommand,
+  execOptions = {}
+) {
+  const b64 = winPathToDockerEnvB64(containerPath);
   return execFileAsync(
     "docker",
     [
       "exec",
       "-e",
-      `${envName}=${envValue}`,
+      `${envB64Name}=${b64}`,
       containerId,
       "powershell.exe",
       "-NoProfile",
@@ -165,7 +186,7 @@ async function dockerExecPowershellWithEnv(containerId, envName, envValue, psCom
       "-Command",
       psCommand,
     ],
-    { encoding: "utf8" }
+    { encoding: "utf8", ...execOptions }
   );
 }
 
@@ -177,19 +198,20 @@ async function readFileBytesFromWindowsContainer(containerId, containerPath) {
   // FileShare.ReadWrite: Tomcat log files stay open for write; ReadAllBytes fails without share.
   const ps = [
     "$ErrorActionPreference='Stop'",
-    `$p=$env:${PS_ENV_READ}`,
+    psDecodePathFromB64Env(PS_ENV_READ_B64),
     `$max=[int64]$env:${PS_ENV_MAX_READ}`,
     "if (-not $p) { throw 'read path empty' }",
     "$fs=New-Object System.IO.FileStream($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)",
     "try { if ($fs.Length -gt $max) { throw [System.IO.IOException]('file too large: ' + $fs.Length + ' bytes') }; $len=[int]$fs.Length; $bytes=New-Object byte[] $len; [void]$fs.Read($bytes, 0, $len) } finally { $fs.Dispose() }",
     "[Convert]::ToBase64String($bytes)",
   ].join(";");
+  const readB64 = winPathToDockerEnvB64(containerPath);
   const { stdout } = await execFileAsync(
     "docker",
     [
       "exec",
       "-e",
-      `${PS_ENV_READ}=${containerPath}`,
+      `${PS_ENV_READ_B64}=${readB64}`,
       "-e",
       `${PS_ENV_MAX_READ}=${String(MAX_READ_BYTES)}`,
       containerId,
@@ -212,7 +234,7 @@ async function readFileBytesFromWindowsContainer(containerId, containerPath) {
 async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8Text) {
   const ps = [
     "$ErrorActionPreference='Stop'",
-    `$p=$env:${PS_ENV_WRITE}`,
+    psDecodePathFromB64Env(PS_ENV_WRITE_B64),
     "if (-not $p) { throw 'write path empty' }",
     "$ms=New-Object System.IO.MemoryStream",
     "$in=[System.Console]::OpenStandardInput()",
@@ -220,13 +242,14 @@ async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8T
     "while ($true) { $n = $in.Read($b, 0, $b.Length); if ($n -eq 0) { break }; [void]$ms.Write($b, 0, $n) }",
     "[System.IO.File]::WriteAllBytes($p, $ms.ToArray())",
   ].join(";");
+  const writeB64 = winPathToDockerEnvB64(containerPath);
   await execFileAsync(
     "docker",
     [
       "exec",
       "-i",
       "-e",
-      `${PS_ENV_WRITE}=${containerPath}`,
+      `${PS_ENV_WRITE_B64}=${writeB64}`,
       containerId,
       "powershell.exe",
       "-NoProfile",
@@ -237,7 +260,10 @@ async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8T
     {
       encoding: "utf8",
       input: Buffer.from(utf8Text ?? "", "utf8"),
-      maxBuffer: 64 * 1024,
+      // stderr from PowerShell can exceed 64KiB on some hosts; tiny maxBuffer caused false failures.
+      maxBuffer: 4 * 1024 * 1024,
+      // No hard kill while streaming large stdin into docker exec.
+      timeout: 0,
     }
   );
 }
@@ -269,13 +295,13 @@ function parsePsJson(stdout) {
 async function listDirWindowsTsv(containerId, dirPath) {
   const ps = [
     "$ErrorActionPreference='Stop'",
-    `$p=$env:${PS_ENV_LIST}`,
+    psDecodePathFromB64Env(PS_ENV_LIST_B64),
     "if (-not $p) { throw 'list path env empty' }",
     "Get-ChildItem -LiteralPath $p -Force | ForEach-Object { ($_.Name -replace [char]9,' ') + [char]9 + $(if($_.PSIsContainer){1}else{0}) + [char]9 + [int64]$_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') }",
   ].join(";");
-  const { stdout, stderr } = await dockerExecPowershellWithEnv(
+  const { stdout, stderr } = await dockerExecPowershellWithPathB64(
     containerId,
-    PS_ENV_LIST,
+    PS_ENV_LIST_B64,
     dirPath,
     ps
   );
@@ -337,13 +363,13 @@ async function listDirWindowsJson(containerId, dirPath) {
     "$ErrorActionPreference='Stop'",
     `[Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8`,
     `$OutputEncoding=[Text.UTF8Encoding]::UTF8`,
-    `$p=$env:${PS_ENV_LIST}`,
+    psDecodePathFromB64Env(PS_ENV_LIST_B64),
     "if (-not $p) { throw 'list path env empty' }",
     "Get-ChildItem -LiteralPath $p -Force | Select-Object @{n='name';e={$_.Name}},@{n='isDir';e={$_.PSIsContainer}},@{n='size';e={[int64]$_.Length}},@{n='mtime';e={$_.LastWriteTimeUtc.ToString('o')}} | ConvertTo-Json -Compress -Depth 4",
   ].join(";");
-  const { stdout } = await dockerExecPowershellWithEnv(
+  const { stdout } = await dockerExecPowershellWithPathB64(
     containerId,
-    PS_ENV_LIST,
+    PS_ENV_LIST_B64,
     dirPath,
     ps
   );
@@ -431,13 +457,13 @@ async function deleteInContainer(containerId, containerPath, platform) {
   if (platform === "windows") {
     const ps = [
       "$ErrorActionPreference='Stop'",
-      `$p=$env:${PS_ENV_DELETE}`,
+      psDecodePathFromB64Env(PS_ENV_DELETE_B64),
       "if (-not $p) { throw 'delete path env empty' }",
       "Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop",
     ].join(";");
-    await dockerExecPowershellWithEnv(
+    await dockerExecPowershellWithPathB64(
       containerId,
-      PS_ENV_DELETE,
+      PS_ENV_DELETE_B64,
       containerPath,
       ps
     );
@@ -524,7 +550,14 @@ async function execInContainer(containerId, platform, cwd, command, shell) {
 export function createApp() {
   const app = express();
   app.use(cors({ origin: true }));
-  app.use(express.json({ limit: "12mb" }));
+  app.use(express.json({ limit: MAX_WRITE_JSON_BYTES }));
+  // Avoid Node default short socket timeouts on long docker exec + large bodies.
+  const longMs = 15 * 60 * 1000;
+  app.use((req, res, next) => {
+    req.setTimeout(longMs);
+    res.setTimeout(longMs);
+    next();
+  });
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "TigerClawDockerManager" });

@@ -18,9 +18,10 @@ export function apiErrorMessage(e: unknown): string {
   return String(e);
 }
 
+/** Large saves go through docker exec + stdin; allow long waits (default axios 120s caused frequent timeouts). */
 const client = axios.create({
   baseURL: "",
-  timeout: 120000,
+  timeout: 900_000,
 });
 
 export type ContainerRow = {

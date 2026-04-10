@@ -53,7 +53,12 @@ const port = Number(
 const host =
   process.env.DOCKER_MANAGER_HOST || fileCfg.host || "127.0.0.1";
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
   // eslint-disable-next-line no-console
   console.log(`TigerClawDockerManager http://${host}:${port}/`);
 });
+// Node 18+ defaults (e.g. requestTimeout 300s) can abort large container saves mid-flight.
+server.timeout = 0;
+if (typeof server.requestTimeout !== "undefined") {
+  server.requestTimeout = 0;
+}

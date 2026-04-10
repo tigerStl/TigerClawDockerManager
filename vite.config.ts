@@ -25,6 +25,13 @@ export default defineConfig({
     {
       name: "docker-explorer-api",
       configureServer(server) {
+        const httpServer = server.httpServer;
+        if (httpServer) {
+          httpServer.timeout = 0;
+          if (typeof httpServer.requestTimeout !== "undefined") {
+            httpServer.requestTimeout = 0;
+          }
+        }
         server.middlewares.use((req, res, next) => {
           const u = req.url ?? "";
           if (!u.startsWith("/api")) return next();
@@ -32,6 +39,13 @@ export default defineConfig({
         });
       },
       configurePreviewServer(server) {
+        const httpServer = server.httpServer;
+        if (httpServer) {
+          httpServer.timeout = 0;
+          if (typeof httpServer.requestTimeout !== "undefined") {
+            httpServer.requestTimeout = 0;
+          }
+        }
         server.middlewares.use((req, res, next) => {
           const u = req.url ?? "";
           if (!u.startsWith("/api")) return next();
