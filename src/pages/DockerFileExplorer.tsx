@@ -122,6 +122,99 @@ function basename(p: string): string {
   return j >= 0 ? s.slice(j + 1) : p;
 }
 
+const ED_SPLIT_KEY = "dockerExplorer.split/editorWidthPx";
+
+function defaultEditorPaneWidth(): number {
+  if (typeof window === "undefined") return 420;
+  try {
+    const raw = localStorage.getItem(ED_SPLIT_KEY);
+    const n = raw ? parseInt(raw, 10) : NaN;
+    if (Number.isFinite(n) && n >= 200) return n;
+  } catch {
+    /* noop */
+  }
+  return Math.min(640, Math.max(280, Math.floor(window.innerWidth * 0.42)));
+}
+
+function findNextRange(
+  text: string,
+  q: string,
+  from: number
+): [number, number] | null {
+  if (!q) return null;
+  let i = text.indexOf(q, from);
+  if (i < 0 && from > 0) i = text.indexOf(q, 0);
+  if (i < 0) return null;
+  return [i, i + q.length];
+}
+
+function findPrevRange(
+  text: string,
+  q: string,
+  selStart: number
+): [number, number] | null {
+  if (!q) return null;
+  let i = selStart > 0 ? text.lastIndexOf(q, selStart - 1) : -1;
+  if (i < 0) i = text.lastIndexOf(q);
+  if (i < 0) return null;
+  return [i, i + q.length];
+}
+
+function IconCopy() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function IconFindPrev() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M18 15l-6-6-6 6" />
+    </svg>
+  );
+}
+
+function IconFindNext() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 export type EditorTab = {
   id: string;
   path: string;
@@ -172,6 +265,11 @@ type DexpCopy = {
   shellSh: string;
   confirmDeleteFolder: (full: string) => string;
   confirmDeleteFile: (full: string) => string;
+  copyPath: string;
+  copyPathDone: string;
+  findInFile: string;
+  findNext: string;
+  findPrev: string;
 };
 
 const DEXP_COPY: Record<DockerFileExplorerLang, DexpCopy> = {
@@ -217,6 +315,11 @@ const DEXP_COPY: Record<DockerFileExplorerLang, DexpCopy> = {
     shellSh: "sh",
     confirmDeleteFolder: (full) => `确定删除文件夹？\n${full}`,
     confirmDeleteFile: (full) => `确定删除文件？\n${full}`,
+    copyPath: "复制路径",
+    copyPathDone: "已复制",
+    findInFile: "在文件中查找",
+    findNext: "下一处",
+    findPrev: "上一处",
   },
   en: {
     container: "Container",
@@ -262,6 +365,11 @@ const DEXP_COPY: Record<DockerFileExplorerLang, DexpCopy> = {
     shellSh: "sh",
     confirmDeleteFolder: (full) => `Delete folder?\n${full}`,
     confirmDeleteFile: (full) => `Delete file?\n${full}`,
+    copyPath: "Copy path",
+    copyPathDone: "Copied",
+    findInFile: "Find in file",
+    findNext: "Next match",
+    findPrev: "Previous match",
   },
 };
 
@@ -301,12 +409,68 @@ export default function DockerFileExplorer({
   >([]);
   const consoleLineId = useRef(0);
   const consoleOutRef = useRef<HTMLPreElement>(null);
+  const splitRootRef = useRef<HTMLDivElement>(null);
+  const splitDragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const editorPaneWidthRef = useRef(defaultEditorPaneWidth());
+  const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const [editorPaneWidth, setEditorPaneWidth] = useState(defaultEditorPaneWidth);
+  const [splitDragging, setSplitDragging] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [copyPathFlash, setCopyPathFlash] = useState(false);
+
+  useEffect(() => {
+    editorPaneWidthRef.current = editorPaneWidth;
+  }, [editorPaneWidth]);
 
   useEffect(() => {
     return () => {
       if (saveDoneTimerRef.current) clearTimeout(saveDoneTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const onResize = () => {
+      const root = splitRootRef.current?.getBoundingClientRect();
+      if (!root) return;
+      const maxW = Math.max(200, root.width - 100 - 6);
+      setEditorPaneWidth((w) => Math.max(200, Math.min(maxW, w)));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!splitDragging) return;
+    const onMove = (e: MouseEvent) => {
+      const drag = splitDragRef.current;
+      const root = splitRootRef.current?.getBoundingClientRect();
+      if (!drag || !root) return;
+      const delta = e.clientX - drag.startX;
+      const maxW = Math.max(200, root.width - 100 - 6);
+      const next = Math.max(200, Math.min(maxW, drag.startW - delta));
+      editorPaneWidthRef.current = next;
+      setEditorPaneWidth(next);
+    };
+    const onUp = () => {
+      splitDragRef.current = null;
+      setSplitDragging(false);
+      try {
+        localStorage.setItem(
+          ED_SPLIT_KEY,
+          String(editorPaneWidthRef.current)
+        );
+      } catch {
+        /* noop */
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [splitDragging]);
 
   useEffect(() => {
     if (platform !== "windows") {
@@ -477,6 +641,46 @@ export default function DockerFileExplorer({
     } finally {
       setSaveBusy(false);
     }
+  };
+
+  const onSplitterMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    splitDragRef.current = {
+      startX: e.clientX,
+      startW: editorPaneWidthRef.current,
+    };
+    setSplitDragging(true);
+  };
+
+  const copyEditorPath = async () => {
+    if (!activeTab?.path) return;
+    try {
+      await navigator.clipboard.writeText(activeTab.path);
+      setCopyPathFlash(true);
+      window.setTimeout(() => setCopyPathFlash(false), 1600);
+    } catch {
+      setErr(
+        language === "en" ? "Could not copy path." : "无法复制路径。"
+      );
+    }
+  };
+
+  const findNextClick = () => {
+    const ta = editorTextareaRef.current;
+    if (!ta || !findQuery) return;
+    const range = findNextRange(ta.value, findQuery, ta.selectionEnd);
+    if (!range) return;
+    ta.focus();
+    ta.setSelectionRange(range[0], range[1]);
+  };
+
+  const findPrevClick = () => {
+    const ta = editorTextareaRef.current;
+    if (!ta || !findQuery) return;
+    const range = findPrevRange(ta.value, findQuery, ta.selectionStart);
+    if (!range) return;
+    ta.focus();
+    ta.setSelectionRange(range[0], range[1]);
   };
 
   const runConsoleCommand = async () => {
@@ -725,7 +929,7 @@ export default function DockerFileExplorer({
       )}
 
       <div className="dexp-body">
-        <div className="dexp-split">
+        <div className="dexp-split" ref={splitRootRef}>
         <div className="dexp-list-pane">
           <div className="dexp-breadcrumb">
             {breadcrumbParts.map((b, i) => (
@@ -774,7 +978,22 @@ export default function DockerFileExplorer({
           </div>
         </div>
 
-        <div className="dexp-editor-pane">
+        <div
+          className={`dexp-splitter${splitDragging ? " dexp-splitter--active" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panes"
+          onMouseDown={onSplitterMouseDown}
+        />
+
+        <div
+          className="dexp-editor-pane"
+          style={{
+            width: editorPaneWidth,
+            flex: "0 0 auto",
+            minWidth: 200,
+          }}
+        >
           <div className="dexp-tabs">
             {tabs.map((tab) => (
               <button
@@ -800,12 +1019,30 @@ export default function DockerFileExplorer({
           <div className="dexp-editor-body">
             {activeTab ? (
               <>
-                <div className="dexp-editor-meta">
-                  {activeTab.path}
-                  {activeTab.readOnly && ` · ${t.readOnly}`}
-                  {activeTab.binary && ` · ${t.binaryNotEditable}`}
+                <div className="dexp-editor-meta-row">
+                  <div className="dexp-editor-meta dexp-editor-meta-path">
+                    {activeTab.path}
+                    {activeTab.readOnly && ` · ${t.readOnly}`}
+                    {activeTab.binary && ` · ${t.binaryNotEditable}`}
+                  </div>
+                  <button
+                    type="button"
+                    className="dexp-icon-btn"
+                    onClick={() => void copyEditorPath()}
+                    title={t.copyPath}
+                    aria-label={t.copyPath}
+                    disabled={!activeTab.path}
+                  >
+                    <IconCopy />
+                  </button>
+                  {copyPathFlash && (
+                    <span className="dexp-copy-toast" role="status">
+                      {t.copyPathDone}
+                    </span>
+                  )}
                 </div>
                 <textarea
+                  ref={editorTextareaRef}
                   className="dexp-editor-textarea"
                   value={activeTab.binary ? t.binaryPlaceholder : activeTab.content}
                   onChange={(e) => updateActiveContent(e.target.value)}
@@ -818,6 +1055,43 @@ export default function DockerFileExplorer({
                       {t.saveDone}
                     </span>
                   )}
+                  <div className="dexp-find-bar">
+                    <input
+                      type="search"
+                      className="dexp-find-input"
+                      placeholder={t.findInFile}
+                      value={findQuery}
+                      onChange={(e) => setFindQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          findNextClick();
+                        }
+                      }}
+                      disabled={activeTab.binary}
+                      aria-label={t.findInFile}
+                    />
+                    <button
+                      type="button"
+                      className="dexp-icon-btn"
+                      onClick={findPrevClick}
+                      disabled={!findQuery || activeTab.binary}
+                      title={t.findPrev}
+                      aria-label={t.findPrev}
+                    >
+                      <IconFindPrev />
+                    </button>
+                    <button
+                      type="button"
+                      className="dexp-icon-btn"
+                      onClick={findNextClick}
+                      disabled={!findQuery || activeTab.binary}
+                      title={t.findNext}
+                      aria-label={t.findNext}
+                    >
+                      <IconFindNext />
+                    </button>
+                  </div>
                   <button
                     type="button"
                     className="dexp-btn dexp-btn-primary"

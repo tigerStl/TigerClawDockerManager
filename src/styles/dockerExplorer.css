@@ -98,11 +98,26 @@
 }
 
 .dexp-list-pane {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  border-right: 1px solid var(--border);
+  min-width: 100px;
+  min-height: 0;
+}
+
+.dexp-splitter {
+  flex: 0 0 5px;
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  align-self: stretch;
+  position: relative;
+  z-index: 2;
+}
+
+.dexp-splitter:hover,
+.dexp-splitter--active {
+  background: rgba(47, 129, 247, 0.45);
 }
 
 .dexp-breadcrumb {
@@ -179,11 +194,10 @@
 }
 
 .dexp-editor-pane {
-  width: min(52%, 720px);
-  min-width: 280px;
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  min-height: 0;
 }
 
 .dexp-tabs {
@@ -249,10 +263,56 @@
   gap: 4px;
 }
 
+.dexp-editor-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .dexp-editor-meta {
   font-size: 11px;
   color: var(--muted);
   font-family: var(--font-mono);
+}
+
+.dexp-editor-meta-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dexp-icon-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.dexp-icon-btn:hover:not(:disabled) {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
+.dexp-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dexp-copy-toast {
+  font-size: 11px;
+  color: var(--success, #3fb950);
+  flex-shrink: 0;
 }
 
 .dexp-editor-textarea {
@@ -280,6 +340,33 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.dexp-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 140px;
+  max-width: 360px;
+  min-width: 0;
+}
+
+.dexp-find-input {
+  flex: 1 1 72px;
+  min-width: 64px;
+  max-width: 220px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-height: 26px;
+}
+
+.dexp-find-input:focus {
+  outline: 1px solid rgba(47, 129, 247, 0.5);
+  outline-offset: 0;
 }
 
 .dexp-save-feedback {

@@ -155,6 +155,8 @@ const PS_ENV_DELETE_B64 = "DEXP_DELETE_PATH_B64";
 const PS_ENV_READ_B64 = "DEXP_READ_PATH_B64";
 const PS_ENV_MAX_READ = "DEXP_MAX_READ_BYTES";
 const PS_ENV_WRITE_B64 = "DEXP_WRITE_PATH_B64";
+const PS_ENV_COPY_FROM_B64 = "DEXP_COPY_FROM_B64";
+const PS_ENV_COPY_TO_B64 = "DEXP_COPY_TO_B64";
 
 function winPathToDockerEnvB64(containerPath) {
   return Buffer.from(containerPath, "utf8").toString("base64");
@@ -403,6 +405,97 @@ async function listDirWindows(containerId, dirPath) {
 
 function quoteSh(s) {
   return "'" + s.replace(/'/g, `'\\''`) + "'";
+}
+
+function backupTimestampYyyyMMddHHmm() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    String(d.getFullYear()) +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    pad(d.getHours()) +
+    pad(d.getMinutes())
+  );
+}
+
+function normalizedContainerPath(filePath, platform) {
+  return platform === "windows"
+    ? filePath.replace(/\//g, "\\")
+    : filePath.replace(/\\/g, "/");
+}
+
+/** Same folder: `{name}_{yyyyMMddHHmm}{ext}`; null if not .yml / .yaml. */
+function siblingYamlBackupPath(filePath, platform, ts) {
+  const norm = normalizedContainerPath(filePath, platform);
+  const parse =
+    platform === "windows" ? path.win32.parse(norm) : path.posix.parse(norm);
+  const extRaw = (parse.ext || "").slice(1).toLowerCase();
+  if (extRaw !== "yml" && extRaw !== "yaml") return null;
+  const join = platform === "windows" ? path.win32.join : path.posix.join;
+  const backupName = `${parse.name}_${ts}${parse.ext}`;
+  return join(parse.dir || (platform === "windows" ? "\\" : "/"), backupName);
+}
+
+async function copyFileInsideWindowsContainerIfExists(
+  containerId,
+  fromPath,
+  toPath
+) {
+  const ps = [
+    "$ErrorActionPreference='Stop'",
+    `$pFrom=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:${PS_ENV_COPY_FROM_B64}))`,
+    `$pTo=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:${PS_ENV_COPY_TO_B64}))`,
+    "if (-not $pFrom -or -not $pTo) { throw 'copy paths empty' }",
+    "if (Test-Path -LiteralPath $pFrom) { Copy-Item -LiteralPath $pFrom -Destination $pTo -Force }",
+  ].join(";");
+  const fromB64 = winPathToDockerEnvB64(fromPath);
+  const toB64 = winPathToDockerEnvB64(toPath);
+  await execFileAsync(
+    "docker",
+    [
+      "exec",
+      "-e",
+      `${PS_ENV_COPY_FROM_B64}=${fromB64}`,
+      "-e",
+      `${PS_ENV_COPY_TO_B64}=${toB64}`,
+      containerId,
+      "powershell.exe",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      ps,
+    ],
+    { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 0 }
+  );
+}
+
+async function copyFileInsideLinuxContainerIfExists(
+  containerId,
+  fromPath,
+  toPath
+) {
+  const inner = `if [ -f ${quoteSh(fromPath)} ]; then cp ${quoteSh(
+    fromPath
+  )} ${quoteSh(toPath)}; fi`;
+  await execFileAsync(
+    "docker",
+    ["exec", containerId, "sh", "-c", inner],
+    { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 0 }
+  );
+}
+
+/** Before overwriting .yml/.yaml, copy existing file beside it (skipped if missing). */
+async function backupYamlSiblingBeforeSave(containerId, filePath, platform) {
+  const ts = backupTimestampYyyyMMddHHmm();
+  const dest = siblingYamlBackupPath(filePath, platform, ts);
+  if (!dest) return;
+  const src = normalizedContainerPath(filePath, platform);
+  if (platform === "windows") {
+    await copyFileInsideWindowsContainerIfExists(containerId, src, dest);
+  } else {
+    await copyFileInsideLinuxContainerIfExists(containerId, src, dest);
+  }
 }
 
 async function listDirLinux(containerId, dirPath) {
@@ -669,6 +762,7 @@ export function createApp() {
     }
     try {
       const platform = await dockerInspectOs(req.params.id);
+      await backupYamlSiblingBeforeSave(req.params.id, filePath, platform);
       if (platform === "windows") {
         await writeUtf8FileToWindowsContainer(
           req.params.id,
