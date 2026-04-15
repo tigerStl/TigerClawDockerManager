@@ -9,6 +9,8 @@ Standalone tool: browse files inside running Docker containers and run one-shot 
 - Node.js 20+ (development)
 - Docker CLI on PATH, Docker Desktop/daemon running
 
+**Windows containers (Hyper-V isolation):** uploads and file writes do **not** use `docker cp` into the running container (that often fails with *filesystem operations against a running Hyper-V container are not supported*). The API streams file bytes via `docker exec` + PowerShell instead, including ZIP/folder extracts copied file-by-file.
+
 ## Development
 
 **Web only** (default browser URL http://127.0.0.1:9847 unless you set a port in `docker-manager.config.yml`):

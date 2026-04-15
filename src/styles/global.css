@@ -22,11 +22,18 @@
 html,
 body {
   height: 100%;
+  min-height: 100dvh;
+  max-height: 100dvh;
   font-size: 14px;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -35,10 +42,19 @@ body {
   letter-spacing: 0.01em;
 }
 
-.appRoot {
-  min-height: 100vh;
+#root {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.appRoot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .appHeader {
@@ -95,9 +111,24 @@ body {
 .appMain {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 10px 14px 80px 14px;
 }
 
 .appMain--explorer {
-  padding: 6px 10px 12px 10px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 6px 10px 8px 10px;
+  overflow: hidden;
+}
+
+.appMain--explorer > * {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }

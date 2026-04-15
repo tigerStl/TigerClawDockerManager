@@ -84,17 +84,36 @@ export async function readFileText(
   return data;
 }
 
+/** Size + mtime for polling (detect external file changes in the container). */
+export async function fetchFileMeta(
+  containerId: string,
+  filePath: string
+): Promise<{ path: string; size: number; mtime: string }> {
+  const { data } = await client.get<{
+    path: string;
+    size: number;
+    mtime: string;
+  }>(`/api/container/${encodeURIComponent(containerId)}/file-meta`, {
+    params: { path: filePath },
+  });
+  return data;
+}
+
 export async function writeFileText(
   containerId: string,
   filePath: string,
   content: string,
   extraBlocked: string[]
 ): Promise<void> {
-  await client.put(`/api/container/${encodeURIComponent(containerId)}/file`, {
-    path: filePath,
-    content,
-    extraBlocked,
-  });
+  await client.put(
+    `/api/container/${encodeURIComponent(containerId)}/file`,
+    /** `filePath` avoids any tooling that mishandles a JSON key named `path`. */
+    { filePath, path: filePath, content, extraBlocked },
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: 900_000,
+    }
+  );
 }
 
 export async function deletePath(
@@ -113,6 +132,7 @@ export type ContainerExecResult = {
   stdout: string;
   stderr: string;
   exitCode: number;
+  reusedSession?: boolean;
 };
 
 export async function execInContainer(
@@ -121,6 +141,8 @@ export async function execInContainer(
     command: string;
     cwd?: string;
     shell?: ContainerExecShell;
+    /** Linux + sh: reuse one long-running `docker exec -i … sh` (session continuity). */
+    reuseSession?: boolean;
   }
 ): Promise<ContainerExecResult> {
   const { data } = await client.post<ContainerExecResult>(
@@ -133,4 +155,64 @@ export async function execInContainer(
 export function downloadUrl(containerId: string, filePath: string): string {
   const q = new URLSearchParams({ path: filePath });
   return `/api/container/${encodeURIComponent(containerId)}/download?${q}`;
+}
+
+/** Upload a .zip; server extracts on host and copies contents into `targetPath` in the container. */
+export async function uploadZipToContainer(
+  containerId: string,
+  targetPath: string,
+  file: File
+): Promise<{ ok: boolean; targetPath: string }> {
+  const fd = new FormData();
+  fd.append("targetPath", targetPath);
+  fd.append("archive", file, file.name);
+  const { data } = await client.post<{ ok: boolean; targetPath: string }>(
+    `/api/container/${encodeURIComponent(containerId)}/upload-zip`,
+    fd,
+    { timeout: 900_000 }
+  );
+  return data;
+}
+
+/** Upload a folder (relative paths preserved); server stages files then `docker cp` into `targetPath`. */
+export async function uploadFolderToContainer(
+  containerId: string,
+  targetPath: string,
+  files: FileList | File[]
+): Promise<{ ok: boolean; targetPath: string; fileCount: number }> {
+  const fd = new FormData();
+  fd.append("targetPath", targetPath);
+  for (const f of Array.from(files)) {
+    const rel =
+      (f as File & { webkitRelativePath?: string }).webkitRelativePath ||
+      f.name;
+    fd.append("files", f, rel);
+  }
+  const { data } = await client.post<{
+    ok: boolean;
+    targetPath: string;
+    fileCount: number;
+  }>(`/api/container/${encodeURIComponent(containerId)}/upload-folder`, fd, {
+    timeout: 900_000,
+  });
+  return data;
+}
+
+/** Upload one file into `targetPath` (container directory); uses the original file name. */
+export async function uploadFileToContainer(
+  containerId: string,
+  targetPath: string,
+  file: File
+): Promise<{ ok: boolean; targetPath: string; filePath: string }> {
+  const fd = new FormData();
+  fd.append("targetPath", targetPath);
+  fd.append("file", file, file.name);
+  const { data } = await client.post<{
+    ok: boolean;
+    targetPath: string;
+    filePath: string;
+  }>(`/api/container/${encodeURIComponent(containerId)}/upload-file`, fd, {
+    timeout: 900_000,
+  });
+  return data;
 }

@@ -7,9 +7,12 @@
 .dexp {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 52px);
-  min-height: 480px;
-  margin: 0 -14px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
   padding: 0;
   background: var(--card);
   border: 1px solid var(--border);
@@ -30,6 +33,7 @@
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
   padding: 4px 6px;
   border-bottom: 1px solid var(--border);
   background: var(--card-elevated);
@@ -53,8 +57,9 @@
 }
 
 .dexp-toolbar .dexp-path-input {
-  flex: 1;
-  min-width: 180px;
+  flex: 1 1 120px;
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--font-mono);
 }
 
@@ -95,20 +100,26 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .dexp-list-pane {
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  min-width: 100px;
+  min-width: 0;
   min-height: 0;
 }
 
 .dexp-splitter {
-  flex: 0 0 5px;
-  width: 5px;
+  flex: 0 0 12px;
+  width: 12px;
+  min-width: 12px;
+  max-width: 12px;
+  flex-shrink: 0;
   cursor: col-resize;
+  touch-action: none;
   background: var(--border);
   align-self: stretch;
   position: relative;
@@ -118,6 +129,12 @@
 .dexp-splitter:hover,
 .dexp-splitter--active {
   background: rgba(47, 129, 247, 0.45);
+}
+
+/** While dragging the file/editor split — avoid text selection stealing the drag */
+html.dexp-split--drag {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .dexp-breadcrumb {
@@ -165,6 +182,51 @@
   top: 0;
   background: var(--card-elevated);
   z-index: 1;
+  vertical-align: middle;
+}
+
+.dexp-table th.dexp-th--sortable {
+  padding: 0;
+}
+
+.dexp-th-sort-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  font: inherit;
+  font-weight: 500;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dexp-th-sort-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dexp-th-sort-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dexp-sort-caret {
+  flex-shrink: 0;
+  font-size: 9px;
+  opacity: 0.9;
+  color: var(--primary);
+}
+
+.dexp-th-sort-label {
+  min-width: 0;
 }
 
 .dexp-table td {
@@ -176,6 +238,41 @@
 
 .dexp-table tr {
   cursor: pointer;
+}
+
+.dexp-table th.dexp-col-download,
+.dexp-table td.dexp-col-download {
+  width: 52px;
+  max-width: 52px;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.dexp-download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--primary);
+  background: rgba(47, 129, 247, 0.12);
+  border: 1px solid rgba(47, 129, 247, 0.35);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.dexp-download-btn:hover:not(:disabled) {
+  background: rgba(47, 129, 247, 0.22);
+  border-color: var(--primary);
+}
+
+.dexp-download-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .dexp-table tr:hover td {
@@ -198,6 +295,8 @@
   flex-direction: column;
   background: var(--bg);
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .dexp-tabs {
@@ -211,43 +310,69 @@
   min-height: 30px;
 }
 
-.dexp-tab {
+.dexp-tab-wrap {
   display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px 4px 8px;
-  font-size: 11px;
-  font-family: var(--font-mono);
+  align-items: stretch;
+  flex-shrink: 0;
+  max-width: 260px;
+  min-width: 0;
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: 3px 3px 0 0;
   margin-bottom: -1px;
-  cursor: pointer;
-  color: var(--text-dim);
-  max-width: 200px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.dexp-tab:hover {
+.dexp-tab-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 2px 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+}
+
+.dexp-tab-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dexp-tab-wrap:hover .dexp-tab-label {
   color: var(--text);
 }
 
-.dexp-tab-active {
+.dexp-tab-wrap--active {
   background: var(--bg);
   border-color: var(--border);
+}
+
+.dexp-tab-wrap--active .dexp-tab-label {
   color: var(--text);
 }
 
 .dexp-tab-close {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 22px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border: none;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  padding: 0 2px;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .dexp-tab-close:hover {
@@ -309,6 +434,42 @@
   cursor: not-allowed;
 }
 
+.dexp-icon-btn--on {
+  border-color: rgba(47, 129, 247, 0.55);
+  color: var(--primary);
+  background: rgba(47, 129, 247, 0.12);
+}
+
+.dexp-icon-btn--danger:hover:not(:disabled) {
+  border-color: rgba(248, 81, 73, 0.55);
+  color: var(--error);
+}
+
+/** One row: refresh / auto / delete | optional “saved” | find | Save */
+.dexp-editor-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.dexp-editor-filetools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+}
+
+.dexp-filetools-badge {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
 .dexp-copy-toast {
   font-size: 11px;
   color: var(--success, #3fb950);
@@ -318,7 +479,7 @@
 .dexp-editor-textarea {
   flex: 1;
   width: 100%;
-  min-height: 200px;
+  min-height: 0;
   resize: none;
   background: #0d1117;
   border: 1px solid var(--border);
@@ -335,20 +496,17 @@
   opacity: 0.65;
 }
 
-.dexp-editor-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .dexp-find-bar {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1 1 140px;
-  max-width: 360px;
+  flex: 1 1 160px;
   min-width: 0;
+  max-width: min(420px, 100%);
+}
+
+.dexp-editor-save-btn {
+  flex: 0 0 auto;
 }
 
 .dexp-find-input {
@@ -472,6 +630,22 @@
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.dexp-console-reuse {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dexp-console-reuse input {
+  cursor: pointer;
 }
 
 .dexp-console-shell {
@@ -525,6 +699,29 @@
   padding: 10px 12px;
 }
 
+.dexp-modal--wide {
+  max-width: 560px;
+}
+
+.dexp-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.dexp-auto-row select {
+  min-width: 140px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
 .dexp-modal h3 {
   margin: 0 0 8px;
   font-size: 14px;
@@ -563,4 +760,64 @@
   font-size: 11px;
   color: var(--muted);
   margin-top: 4px;
+}
+
+.dexp-upload-strip {
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(47, 129, 247, 0.06);
+  font-size: 12px;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.dexp-upload-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.dexp-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dexp-upload-row--grow {
+  align-items: stretch;
+}
+
+.dexp-upload-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.dexp-upload-k {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.dexp-upload-target {
+  flex: 1;
+  min-width: 200px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.dexp-upload-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
 }

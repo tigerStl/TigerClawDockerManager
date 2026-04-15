@@ -16,7 +16,9 @@
     "pack:server": "npm run build && npm run bundle && pkg build/docker-manager.cjs -c package.json -t node18-win-x64 -o release/docker-manager-server.exe -C GZip"
   },
   "pkg": {
-    "assets": ["dist/**/*"]
+    "assets": [
+      "dist/**/*"
+    ]
   },
   "build": {
     "appId": "com.finastar.tigerclawdockermanager",
@@ -39,7 +41,9 @@
       "target": [
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     }
@@ -48,6 +52,8 @@
     "axios": "^1.7.2",
     "cors": "^2.8.5",
     "express": "^4.21.0",
+    "extract-zip": "^2.0.1",
+    "multer": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",

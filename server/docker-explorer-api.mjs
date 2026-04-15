@@ -9,13 +9,18 @@
  */
 import express from "express";
 import cors from "cors";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
+import { once } from "events";
 import { promisify } from "util";
+import { pipeline } from "stream/promises";
+import { Readable } from "stream";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
+import multer from "multer";
+import extract from "extract-zip";
 
 const execFileAsync = promisify(execFile);
 
@@ -24,8 +29,8 @@ const MAX_READ_BYTES = 5 * 1024 * 1024;
 /** JSON body limit for PUT /file (align with editor + MAX_READ_BYTES headroom). */
 const MAX_WRITE_JSON_BYTES = "20mb";
 
-/** Server-side blocked extensions for text read/write via API (download still allowed) */
-const DEFAULT_BLOCKED = new Set([
+/** Server-side: block writes for these (includes scripts). */
+const DEFAULT_BLOCKED_WRITE = new Set([
   "exe",
   "dll",
   "so",
@@ -49,6 +54,11 @@ const DEFAULT_BLOCKED = new Set([
   "bin",
 ]);
 
+/** Server-side: block reads for GET /file only (bat/cmd/ps1 allowed for browse / view-only). Download route has no extension block. */
+const DEFAULT_BLOCKED_READ = new Set(
+  [...DEFAULT_BLOCKED_WRITE].filter((x) => x !== "bat" && x !== "cmd" && x !== "ps1")
+);
+
 function extOf(p) {
   const base = path.basename(p);
   const i = base.lastIndexOf(".");
@@ -56,9 +66,18 @@ function extOf(p) {
   return base.slice(i + 1).toLowerCase();
 }
 
-function isBlockedExt(ext, extraBlocked) {
+function isBlockedExtRead(ext, extraBlocked) {
   const e = (ext || "").toLowerCase().replace(/^\./, "");
-  if (DEFAULT_BLOCKED.has(e)) return true;
+  if (DEFAULT_BLOCKED_READ.has(e)) return true;
+  for (const b of extraBlocked || []) {
+    if (b && e === String(b).toLowerCase().replace(/^\./, "")) return true;
+  }
+  return false;
+}
+
+function isBlockedExtWrite(ext, extraBlocked) {
+  const e = (ext || "").toLowerCase().replace(/^\./, "");
+  if (DEFAULT_BLOCKED_WRITE.has(e)) return true;
   for (const b of extraBlocked || []) {
     if (b && e === String(b).toLowerCase().replace(/^\./, "")) return true;
   }
@@ -157,6 +176,8 @@ const PS_ENV_MAX_READ = "DEXP_MAX_READ_BYTES";
 const PS_ENV_WRITE_B64 = "DEXP_WRITE_PATH_B64";
 const PS_ENV_COPY_FROM_B64 = "DEXP_COPY_FROM_B64";
 const PS_ENV_COPY_TO_B64 = "DEXP_COPY_TO_B64";
+const PS_ENV_MKDIR_B64 = "DEXP_MKDIR_PATH_B64";
+const PS_ENV_STAT_B64 = "DEXP_STAT_PATH_B64";
 
 function winPathToDockerEnvB64(containerPath) {
   return Buffer.from(containerPath, "utf8").toString("base64");
@@ -232,8 +253,12 @@ async function readFileBytesFromWindowsContainer(containerId, containerPath) {
   return Buffer.from(b64, "base64");
 }
 
-/** Write UTF-8 file via stdin (avoids `docker cp` on Hyper-V Windows containers). */
-async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8Text) {
+/**
+ * Write raw bytes via stdin to a path inside a Windows container (avoids `docker cp`).
+ * Required for Hyper-V–isolated Windows containers: `docker cp` to a running container often fails with
+ * "filesystem operations against a running Hyper-V container are not supported".
+ */
+async function writeBytesFileToWindowsContainer(containerId, containerPath, buffer) {
   const ps = [
     "$ErrorActionPreference='Stop'",
     psDecodePathFromB64Env(PS_ENV_WRITE_B64),
@@ -245,28 +270,60 @@ async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8T
     "[System.IO.File]::WriteAllBytes($p, $ms.ToArray())",
   ].join(";");
   const writeB64 = winPathToDockerEnvB64(containerPath);
-  await execFileAsync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      "-e",
-      `${PS_ENV_WRITE_B64}=${writeB64}`,
-      containerId,
-      "powershell.exe",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      ps,
-    ],
-    {
-      encoding: "utf8",
-      input: Buffer.from(utf8Text ?? "", "utf8"),
-      // stderr from PowerShell can exceed 64KiB on some hosts; tiny maxBuffer caused false failures.
-      maxBuffer: 4 * 1024 * 1024,
-      // No hard kill while streaming large stdin into docker exec.
-      timeout: 0,
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+
+  const args = [
+    "exec",
+    "-i",
+    "-e",
+    `${PS_ENV_WRITE_B64}=${writeB64}`,
+    containerId,
+    "powershell.exe",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    ps,
+  ];
+
+  /** `execFile({ input })` is unreliable for large/stdin payloads to `docker exec` on some Windows hosts; stream explicitly. */
+  const child = spawn("docker", args, {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let errText = "";
+  child.stderr?.on("data", (chunk) => {
+    errText += String(chunk);
+  });
+  child.stdout?.on("data", (chunk) => {
+    errText += String(chunk);
+  });
+
+  try {
+    await pipeline(Readable.from(buf), child.stdin);
+  } catch (e) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* ignore */
     }
+    throw e;
+  }
+
+  const [code] = await once(child, "close");
+  if (code !== 0) {
+    const tail = errText.trim().slice(0, 4000);
+    throw new Error(
+      `docker exec failed writing file (exit ${code}): ${tail || "(no output)"}`
+    );
+  }
+}
+
+/** Write UTF-8 text (same transport as binary — avoids `docker cp` on Hyper-V Windows containers). */
+async function writeUtf8FileToWindowsContainer(containerId, containerPath, utf8Text) {
+  await writeBytesFileToWindowsContainer(
+    containerId,
+    containerPath,
+    Buffer.from(utf8Text ?? "", "utf8")
   );
 }
 
@@ -299,7 +356,7 @@ async function listDirWindowsTsv(containerId, dirPath) {
     "$ErrorActionPreference='Stop'",
     psDecodePathFromB64Env(PS_ENV_LIST_B64),
     "if (-not $p) { throw 'list path env empty' }",
-    "Get-ChildItem -LiteralPath $p -Force | ForEach-Object { ($_.Name -replace [char]9,' ') + [char]9 + $(if($_.PSIsContainer){1}else{0}) + [char]9 + [int64]$_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') }",
+    "Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $sz = if ($_.PSIsContainer) { [int64]0 } else { [int64]($_.Length) }; ($_.Name -replace [char]9,' ') + [char]9 + $(if($_.PSIsContainer){1}else{0}) + [char]9 + $sz + [char]9 + $_.LastWriteTimeUtc.ToString('o') }",
   ].join(";");
   const { stdout, stderr } = await dockerExecPowershellWithPathB64(
     containerId,
@@ -328,36 +385,61 @@ function cmdQuotedWinPath(dirPath) {
   return `"${normalized.replace(/"/g, '""')}"`;
 }
 
-/** `dir /a:d /b` + `dir /a /b` — works when PowerShell is missing (Nano Server). */
+/**
+ * One line from `cmd.exe dir /a` (non-/b) — extracts name, dir flag, file size.
+ * Locale/date formats vary; we key off `<DIR>` and a trailing "size name" tail.
+ */
+function parseWindowsDirListingLine(line) {
+  const t = line.replace(/\r$/, "").trimEnd();
+  const trimmed = t.trim();
+  if (!trimmed) return null;
+  const low = trimmed.toLowerCase();
+  if (
+    low.includes("bytes free") ||
+    (low.includes("file(s)") && low.includes("bytes")) ||
+    low.includes("dir(s)")
+  ) {
+    return null;
+  }
+  if (/^(volume|驱动器)/i.test(trimmed) || /directory of/i.test(trimmed)) {
+    return null;
+  }
+
+  const dirIdx = trimmed.search(/\s<DIR>\s+/i);
+  if (dirIdx >= 0) {
+    const name = trimmed.slice(dirIdx).replace(/^\s*<DIR>\s+/i, "").trim();
+    if (!name || name === "." || name === "..") return null;
+    return { name, isDirectory: true, size: 0, mtime: "" };
+  }
+
+  const fileTail = trimmed.match(/\s([\d,]+)\s+(\S(?:.*\S)?)\s*$/);
+  if (!fileTail) return null;
+  if (!/^\d/.test(trimmed)) return null;
+  const size = parseInt(fileTail[1].replace(/,/g, ""), 10);
+  if (!Number.isFinite(size) || size < 0) return null;
+  const name = fileTail[2].trim();
+  if (!name || name === "." || name === "..") return null;
+  return { name, isDirectory: false, size, mtime: "" };
+}
+
+/** `dir /a` full listing — works when PowerShell is missing (Nano Server). Parses sizes from standard dir output. */
 async function listDirWindowsCmd(containerId, dirPath) {
   const forCmd = cmdQuotedWinPath(dirPath);
-  const { stdout: dirsOut } = await execFileAsync(
+  const { stdout } = await execFileAsync(
     "docker",
-    ["exec", containerId, "cmd.exe", "/s", "/c", `dir /a:d /b ${forCmd}`],
+    ["exec", containerId, "cmd.exe", "/s", "/c", `dir /a ${forCmd}`],
     { encoding: "utf8" }
   );
-  const { stdout: allOut } = await execFileAsync(
-    "docker",
-    ["exec", containerId, "cmd.exe", "/s", "/c", `dir /a /b ${forCmd}`],
-    { encoding: "utf8" }
-  );
-  const dirSet = new Set(
-    dirsOut
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
-  const names = allOut
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((n) => n !== "." && n !== "..");
-  return names.map((name) => ({
-    name,
-    isDirectory: dirSet.has(name),
-    size: 0,
-    mtime: "",
-  }));
+  const seen = new Set();
+  const out = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const row = parseWindowsDirListingLine(line);
+    if (!row) continue;
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    out.push(row);
+  }
+  return out;
 }
 
 async function listDirWindowsJson(containerId, dirPath) {
@@ -499,34 +581,80 @@ async function backupYamlSiblingBeforeSave(containerId, filePath, platform) {
 }
 
 async function listDirLinux(containerId, dirPath) {
-  try {
-    const inner = `find ${quoteSh(dirPath)} -mindepth 1 -maxdepth 1 -printf '%f\\t%y\\t%s\\t%T@\\n'`;
-    const { stdout } = await execFileAsync(
-      "docker",
-      ["exec", containerId, "sh", "-c", inner],
-      { encoding: "utf8" }
-    );
-    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  /** GNU find -printf (fast). BusyBox find often lacks -printf — then all sizes were 0 via ls fallback. */
+  const tryGnuFind = `find ${quoteSh(dirPath)} -mindepth 1 -maxdepth 1 -printf '%f\\t%y\\t%s\\t%T@\\n' 2>/dev/null`;
+  /** Portable: find names + stat for size/mtime (BusyBox/GNU). */
+  const portableStat =
+    "find " +
+    quoteSh(dirPath) +
+    " -mindepth 1 -maxdepth 1 2>/dev/null | while IFS= read -r p; do " +
+    '[ -e "$p" ] || continue; b=$(basename "$p"); ' +
+    'if [ -d "$p" ]; then t=d; else t=f; fi; ' +
+    'sz=$(stat -c %s "$p" 2>/dev/null || echo 0); ' +
+    'mt=$(stat -c %Y "$p" 2>/dev/null || echo 0); ' +
+    "printf '%s\\t%s\\t%s\\t%s\\n' \"$b\" \"$t\" \"$sz\" \"$mt\"; " +
+    "done";
+
+  function mapLines(lines) {
     return lines.map((line) => {
-      const [name, type, size, mtime] = line.split("\t");
+      const parts = line.split("\t");
+      const name = parts[0] ?? "";
+      const type = parts[1] ?? "";
+      const size = parseInt(parts[2] ?? "0", 10) || 0;
+      const rawMt = parts[3] ?? "";
+      let mtime = rawMt;
+      if (/^\d+(\.\d+)?$/.test(rawMt.trim())) {
+        const sec = parseFloat(rawMt);
+        if (Number.isFinite(sec)) {
+          mtime = new Date(sec * 1000).toISOString();
+        }
+      }
       return {
         name,
         isDirectory: type === "d",
-        size: parseInt(size, 10) || 0,
-        mtime: mtime || "",
+        size,
+        mtime,
       };
     });
-  } catch {
+  }
+
+  try {
     const { stdout } = await execFileAsync(
       "docker",
-      ["exec", containerId, "ls", "-1", dirPath],
-      { encoding: "utf8" }
+      ["exec", containerId, "sh", "-c", tryGnuFind],
+      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }
     );
-    return stdout
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((name) => ({ name, isDirectory: false, size: 0, mtime: "" }));
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length > 0) {
+      return mapLines(lines);
+    }
+  } catch {
+    /* try portable */
   }
+
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      ["exec", containerId, "sh", "-c", portableStat],
+      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }
+    );
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length > 0) {
+      return mapLines(lines);
+    }
+  } catch {
+    /* last resort */
+  }
+
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", containerId, "ls", "-1", dirPath],
+    { encoding: "utf8" }
+  );
+  return stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((name) => ({ name, isDirectory: false, size: 0, mtime: "" }));
 }
 
 async function dockerCpFromContainer(containerId, containerPath, hostPath) {
@@ -539,10 +667,16 @@ async function dockerCpFromContainer(containerId, containerPath, hostPath) {
 
 async function dockerCpToContainer(hostPath, containerId, containerPath) {
   const osName = await dockerInspectOs(containerId);
-  const dest =
-    osName === "windows"
-      ? `${containerId}:${containerPath.replace(/\//g, "\\")}`
-      : `${containerId}:${containerPath}`;
+  if (osName === "windows") {
+    const buf = await fs.readFile(hostPath);
+    await writeBytesFileToWindowsContainer(
+      containerId,
+      containerPath.replace(/\//g, "\\"),
+      buf
+    );
+    return;
+  }
+  const dest = `${containerId}:${containerPath}`;
   await execFileAsync("docker", ["cp", hostPath, dest]);
 }
 
@@ -575,6 +709,184 @@ function tmpFile() {
   return path.join(os.tmpdir(), `dexp-${crypto.randomBytes(8).toString("hex")}`);
 }
 
+/** Max single archive or per-file size for folder upload (bytes). */
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+
+function sanitizeRelativePath(originalname) {
+  const norm = String(originalname || "")
+    .replace(/\\/g, "/")
+    .replace(/^\//, "")
+    .trim();
+  const parts = norm.split("/").filter((p) => p && p !== "..");
+  if (!parts.length) {
+    throw new Error("invalid relative path");
+  }
+  return path.join(...parts);
+}
+
+function normalizeContainerTargetPath(targetPath, platform) {
+  const t = String(targetPath || "").trim();
+  if (!t) {
+    throw new Error("targetPath required");
+  }
+  if (t.includes("..")) {
+    throw new Error("targetPath must not contain '..'");
+  }
+  return platform === "windows"
+    ? t.replace(/\//g, "\\")
+    : t.replace(/\\/g, "/");
+}
+
+async function ensureDirectoryInContainer(containerId, containerPath, platform) {
+  if (platform === "windows") {
+    const ps = [
+      "$ErrorActionPreference='Stop'",
+      psDecodePathFromB64Env(PS_ENV_MKDIR_B64),
+      "if (-not $p) { throw 'mkdir path empty' }",
+      "New-Item -ItemType Directory -Force -Path $p | Out-Null",
+    ].join(";");
+    const b64 = winPathToDockerEnvB64(containerPath);
+    await execFileAsync(
+      "docker",
+      [
+        "exec",
+        "-e",
+        `${PS_ENV_MKDIR_B64}=${b64}`,
+        containerId,
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        ps,
+      ],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 0 }
+    );
+  } else {
+    await execFileAsync(
+      "docker",
+      ["exec", containerId, "mkdir", "-p", containerPath],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 0 }
+    );
+  }
+}
+
+async function extractZipOnHost(zipPath, destDir) {
+  await fs.mkdir(destDir, { recursive: true });
+  await extract(zipPath, { dir: destDir });
+}
+
+/**
+ * Copy a host directory tree into a container destination.
+ * Linux: `docker cp`. Windows: walk files and stream each via exec (Hyper-V containers reject `docker cp`).
+ */
+async function dockerCpHostDirContentsToContainer(
+  hostDir,
+  containerId,
+  containerDestDir,
+  containerPlatform
+) {
+  const resolved = path.resolve(hostDir);
+  if (containerPlatform === "windows") {
+    const rootWin = containerDestDir.replace(/\//g, "\\");
+    await copyHostTreeIntoWindowsContainer(containerId, resolved, rootWin);
+    return;
+  }
+  const hostSrc = path.join(resolved, ".");
+  const dest = `${containerId}:${containerDestDir}`;
+  await execFileAsync(
+    "docker",
+    ["cp", hostSrc, dest],
+    { encoding: "utf8", maxBuffer: 10 * 1024 * 1024, timeout: 0 }
+  );
+}
+
+/** Recursively copy host folder into a Windows container without `docker cp`. */
+async function copyHostTreeIntoWindowsContainer(
+  containerId,
+  hostRootAbs,
+  containerRootWin
+) {
+  const root = path.resolve(hostRootAbs);
+  const cr = containerRootWin;
+
+  async function walk(currentHost) {
+    const ents = await fs.readdir(currentHost, { withFileTypes: true });
+    for (const ent of ents) {
+      const hostFull = path.join(currentHost, ent.name);
+      const rel = path.relative(root, hostFull);
+      const parts = rel.split(/[/\\]+/).filter(Boolean);
+      const containerPath = path.win32.join(cr, ...parts);
+      if (ent.isDirectory()) {
+        await ensureDirectoryInContainer(containerId, containerPath, "windows");
+        await walk(hostFull);
+      } else {
+        await ensureDirectoryInContainer(
+          containerId,
+          path.win32.dirname(containerPath),
+          "windows"
+        );
+        const buf = await fs.readFile(hostFull);
+        await writeBytesFileToWindowsContainer(containerId, containerPath, buf);
+      }
+    }
+  }
+
+  await ensureDirectoryInContainer(containerId, cr, "windows");
+  await walk(root);
+}
+
+const zipMulter = multer({
+  storage: multer.diskStorage({
+    destination(_req, _file, cb) {
+      cb(null, os.tmpdir());
+    },
+    filename(_req, _file, cb) {
+      cb(null, `dexp-${crypto.randomBytes(12).toString("hex")}.zip`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+});
+
+const fileMulter = multer({
+  storage: multer.diskStorage({
+    destination(_req, _file, cb) {
+      cb(null, os.tmpdir());
+    },
+    filename(_req, file, cb) {
+      const ext = path.extname(file.originalname || "") || ".bin";
+      cb(null, `dexp-${crypto.randomBytes(12).toString("hex")}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+});
+
+function createTreeMulter(stagingBase) {
+  return multer({
+    storage: multer.diskStorage({
+      destination(req, file, cb) {
+        try {
+          const rel = sanitizeRelativePath(file.originalname);
+          const destDir = path.join(stagingBase, path.dirname(rel));
+          fs.mkdir(destDir, { recursive: true })
+            .then(() => cb(null, destDir))
+            .catch(cb);
+        } catch (e) {
+          cb(e);
+        }
+      },
+      filename(_req, file, cb) {
+        try {
+          const rel = sanitizeRelativePath(file.originalname);
+          cb(null, path.basename(rel));
+        } catch (e) {
+          cb(e);
+        }
+      },
+    }),
+    limits: { fileSize: MAX_UPLOAD_BYTES },
+  });
+}
+
 const MAX_EXEC_OUTPUT_CHARS = 400_000;
 
 function truncateOut(s) {
@@ -582,16 +894,187 @@ function truncateOut(s) {
   return `${s.slice(0, MAX_EXEC_OUTPUT_CHARS)}\n... (output truncated)`;
 }
 
-/**
- * One-shot command in container (not a PTY). `command` is a single argv to cmd/sh — avoids host shell injection.
- */
-async function execInContainer(containerId, platform, cwd, command, shell) {
+/** Linux only: one long-running `docker exec -i … sh` per container; commands are queued (same shell process). */
+const linuxPersistentSessions = new Map();
+
+function posixSingleQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+async function execLinuxPersistentShell(containerId, cwd, command) {
   const cmd = String(command ?? "").trim();
   if (!cmd) {
     throw new Error("command required");
   }
   if (cmd.length > 32 * 1024) {
     throw new Error("command too long");
+  }
+  let session = linuxPersistentSessions.get(containerId);
+  if (
+    !session ||
+    session.proc.exitCode !== null ||
+    session.proc.killed
+  ) {
+    const boot =
+      'while IFS= read -r __b64; do ' +
+      '__s=$(printf "%s" "$__b64" | base64 -d 2>/dev/null) || continue; ' +
+      'eval "$__s" || true; done';
+    const proc = spawn(
+      "docker",
+      ["exec", "-i", containerId, "sh", "-c", boot],
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+    );
+    session = { proc, chain: Promise.resolve(), lastStderr: "" };
+    proc.on("exit", () => {
+      linuxPersistentSessions.delete(containerId);
+    });
+    proc.stderr?.on("data", (d) => {
+      session.lastStderr = (session.lastStderr || "") + String(d);
+    });
+    linuxPersistentSessions.set(containerId, session);
+  }
+
+  const token = crypto.randomBytes(8).toString("hex");
+  const marker = `__DEXP_T_${token}__`;
+  const cwdQ = posixSingleQuote((cwd != null && String(cwd).trim()) || "/");
+  const script = `cd ${cwdQ} 2>/dev/null || cd /; ${cmd}; printf '\\n${marker}%s\\n' "$?"`;
+  const line = Buffer.from(script, "utf8").toString("base64");
+
+  const { proc } = session;
+  const escMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`${escMarker}(\\d+)`);
+
+  const p = new Promise((resolve, reject) => {
+    let buf = "";
+    let settled = false;
+    const finish = (err, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(val);
+    };
+    const timer = setTimeout(() => {
+      proc.stdout.removeListener("data", onData);
+      finish(new Error("persistent exec timeout (120s)"));
+    }, 120_000);
+    const onData = (chunk) => {
+      buf += String(chunk);
+      const m = buf.match(re);
+      if (!m) return;
+      const exitCode = parseInt(m[1], 10);
+      const idx = buf.indexOf(marker);
+      const stdoutText = idx >= 0 ? buf.slice(0, idx).trimEnd() : buf;
+      proc.stdout.removeListener("data", onData);
+      finish(null, {
+        stdout: truncateOut(stdoutText),
+        stderr: truncateOut(session.lastStderr || ""),
+        exitCode: Number.isFinite(exitCode) ? exitCode : 1,
+        reusedSession: true,
+      });
+      session.lastStderr = "";
+    };
+    proc.stdout.on("data", onData);
+    session.lastStderr = "";
+    proc.stdin.write(`${line}\n`, (err) => {
+      if (err) {
+        proc.stdout.removeListener("data", onData);
+        finish(err);
+      }
+    });
+  });
+
+  session.chain = session.chain.catch(() => {}).then(() => p);
+  return p;
+}
+
+async function fileMetaInContainer(containerId, filePath, platform) {
+  if (platform === "windows") {
+    const ps = [
+      "$ErrorActionPreference='Stop'",
+      `$p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:${PS_ENV_STAT_B64}))`,
+      "if (-not $p) { throw 'stat path empty' }",
+      "$i=Get-Item -LiteralPath $p",
+      "Write-Output (($i.Length.ToString()) + [char]9 + $i.LastWriteTimeUtc.ToString('o'))",
+    ].join(";");
+    const b64 = winPathToDockerEnvB64(filePath);
+    const { stdout } = await execFileAsync(
+      "docker",
+      [
+        "exec",
+        "-e",
+        `${PS_ENV_STAT_B64}=${b64}`,
+        containerId,
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        ps,
+      ],
+      { encoding: "utf8", maxBuffer: 65536, timeout: 60_000 }
+    );
+    const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
+    const tab = line.indexOf("\t");
+    if (tab < 0) {
+      throw new Error("stat output unexpected");
+    }
+    const sizeStr = line.slice(0, tab);
+    const mtime = line.slice(tab + 1);
+    return {
+      path: filePath,
+      size: parseInt(sizeStr, 10) || 0,
+      mtime: mtime || "",
+    };
+  }
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", containerId, "stat", "-c", "%s %Y", filePath],
+    { encoding: "utf8", maxBuffer: 8192, timeout: 60_000 }
+  );
+  const parts = stdout.trim().split(/\s+/);
+  const sizeStr = parts[0] ?? "0";
+  const mt = parts[1] ?? "";
+  const sec = parseInt(mt, 10);
+  return {
+    path: filePath,
+    size: parseInt(sizeStr, 10) || 0,
+    mtime:
+      Number.isFinite(sec) && sec > 0
+        ? new Date(sec * 1000).toISOString()
+        : "",
+  };
+}
+
+/**
+ * One-shot command in container (not a PTY). `command` is a single argv to cmd/sh — avoids host shell injection.
+ * `reuseSession` (Linux + sh): reuse one long-running `docker exec -i … sh` per container.
+ */
+async function execInContainer(
+  containerId,
+  platform,
+  cwd,
+  command,
+  shell,
+  reuseSession = false
+) {
+  const cmd = String(command ?? "").trim();
+  if (!cmd) {
+    throw new Error("command required");
+  }
+  if (cmd.length > 32 * 1024) {
+    throw new Error("command too long");
+  }
+  if (
+    reuseSession &&
+    platform === "linux" &&
+    shell !== "powershell" &&
+    shell !== "cmd"
+  ) {
+    try {
+      return await execLinuxPersistentShell(containerId, cwd, cmd);
+    } catch (e) {
+      /* fall back to one-shot */
+    }
   }
   const args = ["exec"];
   const wd = cwd != null ? String(cwd).trim() : "";
@@ -626,6 +1109,7 @@ async function execInContainer(containerId, platform, cwd, command, shell) {
       stdout: truncateOut(stdout),
       stderr: truncateOut(stderr),
       exitCode: 0,
+      reusedSession: false,
     };
   } catch (e) {
     const stdout = truncateOut(
@@ -636,7 +1120,12 @@ async function execInContainer(containerId, platform, cwd, command, shell) {
     );
     const code =
       typeof e.code === "number" && !Number.isNaN(e.code) ? e.code : 1;
-    return { stdout, stderr, exitCode: code };
+    return {
+      stdout,
+      stderr,
+      exitCode: code,
+      reusedSession: false,
+    };
   }
 }
 
@@ -708,7 +1197,7 @@ export function createApp() {
       return res.status(400).json({ error: "path query required" });
     }
     const ext = extOf(filePath);
-    if (isBlockedExt(ext, extraBlocked)) {
+    if (isBlockedExtRead(ext, extraBlocked)) {
       return res.status(403).json({ error: "File type not allowed" });
     }
     try {
@@ -736,7 +1225,21 @@ export function createApp() {
       const text = buf.toString("utf8");
       const extLower = extOf(filePath);
       const forceText =
-        extLower === "log" || extLower === "out" || extLower === "trace";
+        extLower === "log" ||
+        extLower === "out" ||
+        extLower === "trace" ||
+        extLower === "yml" ||
+        extLower === "yaml" ||
+        extLower === "xml" ||
+        extLower === "json" ||
+        extLower === "properties" ||
+        extLower === "config" ||
+        extLower === "conf" ||
+        extLower === "cfg" ||
+        extLower === "ini" ||
+        extLower === "env" ||
+        extLower === "toml" ||
+        extLower === "md";
       const looksBinary = forceText
         ? false
         : /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text.slice(0, 4096));
@@ -751,13 +1254,37 @@ export function createApp() {
     }
   });
 
-  app.put("/api/container/:id/file", async (req, res) => {
-    const { path: filePath, content, extraBlocked = [] } = req.body || {};
+  /** Lightweight size + mtime for polling (change detection). */
+  app.get("/api/container/:id/file-meta", async (req, res) => {
+    const filePath = req.query.path;
     if (!filePath || typeof filePath !== "string") {
-      return res.status(400).json({ error: "path required" });
+      return res.status(400).json({ error: "path query required" });
+    }
+    try {
+      const platform = await dockerInspectOs(req.params.id);
+      const meta = await fileMetaInContainer(req.params.id, filePath, platform);
+      res.json(meta);
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.put("/api/container/:id/file", async (req, res) => {
+    const body = req.body || {};
+    const filePath =
+      typeof body.filePath === "string"
+        ? body.filePath
+        : typeof body.path === "string"
+          ? body.path
+          : "";
+    const { content, extraBlocked } = body;
+    const extra =
+      Array.isArray(extraBlocked) ? extraBlocked : [];
+    if (!filePath) {
+      return res.status(400).json({ error: "filePath or path required" });
     }
     const ext = extOf(filePath);
-    if (isBlockedExt(ext, extraBlocked)) {
+    if (isBlockedExtWrite(ext, extra)) {
       return res.status(403).json({ error: "File type not allowed" });
     }
     try {
@@ -836,7 +1363,7 @@ export function createApp() {
   });
 
   app.post("/api/container/:id/exec", async (req, res) => {
-    const { command, cwd, shell } = req.body || {};
+    const { command, cwd, shell, reuseSession } = req.body || {};
     if (!command || typeof command !== "string") {
       return res.status(400).json({ error: "command required" });
     }
@@ -859,13 +1386,164 @@ export function createApp() {
         platform,
         cwdStr,
         command,
-        resolvedShell
+        resolvedShell,
+        !!reuseSession
       );
       res.json(result);
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
     }
   });
+
+  /**
+   * Multipart: `targetPath` (container dir), `archive` (.zip).
+   * Extract on the Docker host, then `docker cp` into the container (works for Linux/Windows containers).
+   */
+  app.post(
+    "/api/container/:id/upload-zip",
+    (req, res, next) => {
+      zipMulter.single("archive")(req, res, (err) => {
+        if (err) {
+          return res
+            .status(400)
+            .json({ error: String(err?.message || err) });
+        }
+        next();
+      });
+    },
+    async (req, res) => {
+      const targetPathRaw = req.body?.targetPath;
+      if (!targetPathRaw || typeof targetPathRaw !== "string") {
+        if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
+        return res.status(400).json({ error: "targetPath required" });
+      }
+      let zipPath;
+      let extractDir;
+      try {
+        if (!req.file?.path) {
+          return res.status(400).json({ error: "zip file required (field: archive)" });
+        }
+        zipPath = req.file.path;
+        const platform = await dockerInspectOs(req.params.id);
+        const targetPath = normalizeContainerTargetPath(targetPathRaw, platform);
+        await ensureDirectoryInContainer(req.params.id, targetPath, platform);
+        extractDir = path.join(
+          os.tmpdir(),
+          `dexp-extract-${crypto.randomBytes(8).toString("hex")}`
+        );
+        await extractZipOnHost(zipPath, extractDir);
+        await dockerCpHostDirContentsToContainer(
+          extractDir,
+          req.params.id,
+          targetPath,
+          platform
+        );
+        res.json({ ok: true, targetPath });
+      } catch (e) {
+        res.status(500).json({ error: String(e?.message || e) });
+      } finally {
+        if (zipPath) await fs.unlink(zipPath).catch(() => {});
+        if (extractDir) {
+          await fs.rm(extractDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
+  );
+
+  /**
+   * Multipart: `targetPath`, multiple `files` with relative paths (browser: webkitRelativePath).
+   */
+  app.post("/api/container/:id/upload-folder", (req, res) => {
+    const stagingBase = path.join(
+      os.tmpdir(),
+      `dexp-tree-${crypto.randomBytes(10).toString("hex")}`
+    );
+    const treeUpload = createTreeMulter(stagingBase).array("files", 100_000);
+
+    fs.mkdir(stagingBase, { recursive: true })
+      .then(
+        () =>
+          new Promise((resolve, reject) => {
+            treeUpload(req, res, (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          })
+      )
+      .then(async () => {
+        const targetPathRaw = req.body?.targetPath;
+        if (!targetPathRaw || typeof targetPathRaw !== "string") {
+          throw new Error("targetPath required");
+        }
+        const files = req.files;
+        if (!files?.length) {
+          throw new Error("no files (field: files)");
+        }
+        const platform = await dockerInspectOs(req.params.id);
+        const targetPath = normalizeContainerTargetPath(targetPathRaw, platform);
+        await ensureDirectoryInContainer(req.params.id, targetPath, platform);
+        await dockerCpHostDirContentsToContainer(
+          stagingBase,
+          req.params.id,
+          targetPath,
+          platform
+        );
+        res.json({ ok: true, targetPath, fileCount: files.length });
+      })
+      .catch((e) => {
+        const msg = String(e?.message || e);
+        const code =
+          /required|no files|invalid relative/i.test(msg) ? 400 : 500;
+        res.status(code).json({ error: msg });
+      })
+      .finally(() =>
+        fs.rm(stagingBase, { recursive: true, force: true }).catch(() => {})
+      );
+  });
+
+  /**
+   * Multipart: `targetPath` (container directory), single `file` — copied as `basename(originalname)` into that folder.
+   */
+  app.post(
+    "/api/container/:id/upload-file",
+    (req, res, next) => {
+      fileMulter.single("file")(req, res, (err) => {
+        if (err) {
+          return res
+            .status(400)
+            .json({ error: String(err?.message || err) });
+        }
+        next();
+      });
+    },
+    async (req, res) => {
+      const targetDirRaw = req.body?.targetPath;
+      let hostTmp;
+      try {
+        if (!targetDirRaw || typeof targetDirRaw !== "string") {
+          if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
+          return res.status(400).json({ error: "targetPath required" });
+        }
+        if (!req.file?.path) {
+          return res.status(400).json({ error: 'file required (field: "file")' });
+        }
+        hostTmp = req.file.path;
+        const safeOrig = String(req.file.originalname || "").replace(/[/\\]/g, "");
+        const baseName = path.basename(safeOrig) || "upload.bin";
+        const platform = await dockerInspectOs(req.params.id);
+        const targetDir = normalizeContainerTargetPath(targetDirRaw, platform);
+        const joinF = platform === "windows" ? path.win32.join : path.posix.join;
+        const destPath = joinF(targetDir, baseName);
+        await ensureDirectoryInContainer(req.params.id, targetDir, platform);
+        await dockerCpToContainer(hostTmp, req.params.id, destPath);
+        res.json({ ok: true, targetPath: targetDir, filePath: destPath });
+      } catch (e) {
+        res.status(500).json({ error: String(e?.message || e) });
+      } finally {
+        if (hostTmp) await fs.unlink(hostTmp).catch(() => {});
+      }
+    }
+  );
 
   return app;
 }
