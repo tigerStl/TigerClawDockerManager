@@ -84,6 +84,12 @@
   color: var(--primary);
 }
 
+.dexp-btn--on {
+  border-color: rgba(47, 129, 247, 0.55);
+  color: var(--primary);
+  background: rgba(47, 129, 247, 0.12);
+}
+
 .dexp-btn-danger {
   border-color: rgba(248, 81, 73, 0.45);
   color: var(--error);

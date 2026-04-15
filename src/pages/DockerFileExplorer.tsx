@@ -480,6 +480,8 @@ type DexpCopy = {
   findNext: string;
   findPrev: string;
   uploadToggle: string;
+  uploadToggleOpen: string;
+  uploadToggleClosed: string;
   uploadTitle: string;
   uploadModeZip: string;
   uploadModeFolder: string;
@@ -565,6 +567,8 @@ const DEXP_COPY: Record<DockerFileExplorerLang, DexpCopy> = {
     findNext: "下一处",
     findPrev: "上一处",
     uploadToggle: "上传…",
+    uploadToggleOpen: "已打开",
+    uploadToggleClosed: "已收起",
     uploadTitle: "上传到容器目录",
     uploadModeZip: "ZIP 压缩包",
     uploadModeFolder: "本地文件夹",
@@ -655,6 +659,8 @@ const DEXP_COPY: Record<DockerFileExplorerLang, DexpCopy> = {
     findNext: "Next match",
     findPrev: "Previous match",
     uploadToggle: "Upload…",
+    uploadToggleOpen: "Open",
+    uploadToggleClosed: "Closed",
     uploadTitle: "Upload into container folder",
     uploadModeZip: "ZIP archive",
     uploadModeFolder: "Local folder",
@@ -1575,11 +1581,14 @@ export default function DockerFileExplorer({
         </button>
         <button
           type="button"
-          className="dexp-btn"
+          className={`dexp-btn${uploadPanelOpen ? " dexp-btn--on" : ""}`}
           disabled={!containerId}
           onClick={toggleUploadPanel}
+          aria-expanded={uploadPanelOpen}
+          aria-pressed={uploadPanelOpen}
+          title={`${t.uploadToggle} (${uploadPanelOpen ? t.uploadToggleOpen : t.uploadToggleClosed})`}
         >
-          {t.uploadToggle}
+          {t.uploadToggle} {uploadPanelOpen ? "▲" : "▼"}
         </button>
         <button type="button" className="dexp-btn" onClick={openSettings}>
           {t.settings}
